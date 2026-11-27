@@ -17,6 +17,6 @@ class Config:
     qdrant_url: str = field(default_factory=lambda: os.getenv("QDRANT_URL", ""))
     collection: str = field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "regulations_v1"))
     reviewer_token: str = field(default_factory=lambda: os.getenv("RAG_REVIEW_TOKEN", ""))
-    top_k: int = 6
+    top_k: int = field(default_factory=lambda: max(1, min(12, int(os.getenv("RAG_TOP_K", "6")))))
     max_clarifications: int = 2
     context_messages: int = field(default_factory=lambda: max(1, int(os.getenv("RAG_CONTEXT_MESSAGES", "5"))))
