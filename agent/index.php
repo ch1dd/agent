@@ -1,5 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/session.php';
+require 'db.php';
 $isLoggedIn = isset($_SESSION['user_id']);
 $isAdmin = isset($_SESSION['role']) && $_SESSION['role'] === 'admin';
 ?>
@@ -21,7 +22,7 @@ $isAdmin = isset($_SESSION['role']) && $_SESSION['role'] === 'admin';
                 <?php else: ?>
                     <a href="dashboard.php">Кабинет</a>
                 <?php endif; ?>
-                <a href="logout.php">Выйти</a>
+                <a href="logout.php?token=<?= csrf_token() ?>">Выйти</a>
             <?php else: ?>
                 <a href="login.php">Войти</a>
                 <a href="register.php">Регистрация</a>

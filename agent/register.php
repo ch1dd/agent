@@ -1,6 +1,6 @@
 <?php
+require_once __DIR__ . '/session.php';
 require 'db.php';
-session_start();
 
 $error = '';
 $success = '';
