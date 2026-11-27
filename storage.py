@@ -65,6 +65,9 @@ class Store:
                     id INTEGER PRIMARY KEY, owner TEXT NOT NULL, chat TEXT NOT NULL, request TEXT NOT NULL,
                     question TEXT NOT NULL, result TEXT NOT NULL, UNIQUE(owner,chat,request));
             """)
+            if "basis" not in {r[1] for r in conn.execute("PRAGMA table_info(turns)")}:
+                conn.execute("ALTER TABLE turns ADD COLUMN basis TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS turns_repeat ON turns(owner,chat,question,basis)")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(tickets)")}
             for col, definition in [("owner", "TEXT DEFAULT ''"), ("revision", "INTEGER DEFAULT 0"),
                                     ("publication", "TEXT DEFAULT 'private'")]:
@@ -117,6 +120,11 @@ class Store:
     def has_sources(self):
         with self.db() as conn:
             return conn.execute("SELECT 1 FROM active LIMIT 1").fetchone() is not None
+
+    def basis(self):
+        with self.db() as conn:
+            versions = [row[0] for row in conn.execute("SELECT version FROM active ORDER BY source")]
+        return digest(json.dumps(["verified-answer-v1", self.config.model, self.config.top_k, versions]))
 
     def search(self, query):
         if not self.has_sources():

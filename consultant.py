@@ -145,14 +145,22 @@ class Consultant:
                 if cached["question"] != question:
                     raise ValueError("Этот идентификатор запроса уже использован.")
                 return json.loads(cached["result"])
-            # PHP supplies authoritative recent MySQL rows. Streamlit reads its local history.
-            rows = self.recent(owner, chat) if previous is None else previous
-            messages, count = context(rows, self.store.config.context_messages)
-            messages.append({"role": "user", "content": question})
-            ref = digest(json.dumps([owner, chat, request]))
-            reply = respond(self.store, messages, ref, count, owner)
-            result = asdict(reply)
+            basis = self.store.basis()
             with self.store.db() as conn:
-                conn.execute("INSERT INTO turns(owner,chat,request,question,result) VALUES (?,?,?,?,?)",
-                             (owner, chat, request, question, json.dumps(result, ensure_ascii=False)))
+                verified = conn.execute("""SELECT result FROM turns WHERE owner=? AND chat=? AND question=?
+                                        AND basis=? ORDER BY id DESC LIMIT 1""", (owner, chat, question, basis)).fetchone()
+            if verified:
+                result = json.loads(verified["result"])
+            else:
+                # PHP supplies authoritative recent MySQL rows. Streamlit reads its local history.
+                rows = self.recent(owner, chat) if previous is None else previous
+                messages, count = context(rows, self.store.config.context_messages)
+                messages.append({"role": "user", "content": question})
+                ref = digest(json.dumps([owner, chat, request]))
+                result = asdict(respond(self.store, messages, ref, count, owner))
+                if not result["standalone"] or self.store.basis() != basis:
+                    basis = None
+            with self.store.db() as conn:
+                conn.execute("INSERT INTO turns(owner,chat,request,question,result,basis) VALUES (?,?,?,?,?,?)",
+                             (owner, chat, request, question, json.dumps(result, ensure_ascii=False), basis))
             return result

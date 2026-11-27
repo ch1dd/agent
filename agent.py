@@ -38,7 +38,7 @@ OUTSIDE = "Я отвечаю на вопросы о процессах комп�
 def message_kind(model, query):
     words = " ".join(re.findall(r"[\w]+", query.casefold()))
     # Clear standalone procedural questions need no model rewrite or history.
-    asks = re.search(r"\b(кто|где|когда|кому|како\w*|сколько|котор\w*|в чем)\b", words)
+    asks = re.match(r"^(?:(?:подскажите|пожалуйста|скажите|а)\s+)*(кто|где|когда|кому|како\w*|сколько|в чем)\b", words)
     subject = re.search(r"\b(договор\w*|регламент\w*|пресейл\w*|заявк\w*|проект\w*|сделк\w*)\b", words)
     action = re.search(r"\b(подпис\w*|соглас\w*|хран\w*|регистр\w*|расч[её]т\w*|скоринг\w*|заполня\w*|подготов\w*|ответствен\w*)\b", words)
     if asks and subject and action:
@@ -59,6 +59,7 @@ class Reply:
     source: str = ""
     ticket_id: int | None = None
     used: list[int] = field(default_factory=list)  # Zero-based positions in hits
+    standalone: bool = False
 
 
 def branch_question(selected, hits, dialogue, cited=()):
@@ -141,7 +142,7 @@ def respond(store, dialogue, ref, clarifications=0, owner=""):
                 if check and check.supported:
                     origin = "\n".join(" · ".join(filter(None, (p.source, p.location, p.topic))) for p in selected)
                     return Reply("answer", "\n\n".join(p.body for p in selected), hits, origin,
-                                 used=[n-1 for n in group])
+                                 used=[n-1 for n in group], standalone=(kind == "standalone"))
         elif decision and decision.action == "clarify":
             question = decision.question.strip()
         if question:

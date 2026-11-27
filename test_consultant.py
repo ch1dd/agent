@@ -78,7 +78,7 @@ class ConsultantTest(unittest.TestCase):
         self.assertEqual(first, self.ask(q, request=req))
         self.assertEqual(self.ask("соси х3уй")["kind"], "off_topic")
         self.assertEqual(first, self.ask(q))
-        self.assertEqual(self.model.queries[0], self.model.queries[-1])
+        self.assertEqual(len(self.model.queries), 1)
         self.assertFalse(self.bot.store.tickets())
         self.bot.close()
         self.bot = Consultant(Store(self.config, self.model))
@@ -87,6 +87,9 @@ class ConsultantTest(unittest.TestCase):
         self.ask("А с юридическим?")
         self.assertTrue(all(m["content"] != "соси х3уй" for m in self.model.queries[-1]))
         self.assertEqual(len(self.model.queries[-1]), 5)
+        (self.config.documents / "порядок.txt").write_text("Договор подписывает заместитель.", encoding="utf-8")
+        sync(self.bot.store, self.config.documents)
+        self.assertEqual(self.ask(q)["text"], "Договор подписывает заместитель.")
 
     def test_search_and_upload_during_indexing(self):
         first = self.bot.upload("приказ.txt", io.BytesIO("ЗАДЕРЖКА".encode()))
@@ -130,6 +133,23 @@ class ConsultantTest(unittest.TestCase):
         job = self.bot.store.review(ticket, "Срок?", "Два дня", "Анна", True, 2)
         self.wait_job(job)
         self.assertNotIn("Три дня", [h.passage.body for h in self.bot.store.search("Срок")])
+
+    def test_minimal_sufficient_sources(self):
+        (self.config.documents / "сроки.txt").write_text("Срок регистрации два дня.", encoding="utf-8")
+        sync(self.bot.store, self.config.documents)
+        for count in (1, 2):
+            def classify(instruction, data, schema):
+                if schema is Decision:
+                    return Decision(action="answer", passage=1, additional=[2], question="")
+                if schema is Verification:
+                    return Verification(supported=len(data["номера_цитат_в_ответе"]) >= count)
+                return Intent(kind="standalone")
+            with patch.object(self.model, "classify", side_effect=classify):
+                reply = self.ask(f"Вопрос {count}")
+            self.assertEqual(len(reply["used"]), count)
+            for index in reply["used"]:
+                hit = reply["hits"][index]
+                self.assertIn(self.bot.original(hit["version"])[1].read_text("utf-8"), reply["text"])
 
     def test_http_roles_and_mysql_context_contract(self):
         from starlette.testclient import TestClient
