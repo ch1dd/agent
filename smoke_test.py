@@ -29,6 +29,19 @@ def run():
             direct = respond(store, [user("Кто подписывает агентский договор с физическим лицом?")], uuid4().hex)
             check("Ответ", direct, "answer")
             assert "коммерческий директор" in direct.text
+            insult = respond(store, [
+                user("Кто подписывает агентский договор с физическим лицом?"),
+                {"role": "assistant", "content": direct.text}, user("соси х3уй"),
+            ], uuid4().hex)
+            check("Посторонняя реплика", insult, "off_topic")
+            repeat = respond(store, [
+                user("Кто подписывает агентский договор с физическим лицом?"),
+                {"role": "assistant", "content": direct.text},
+                user("Кто подписывает агентский договор с физическим лицом?"),
+            ], uuid4().hex)
+            check("Повтор исходного вопроса", repeat, "answer")
+            assert (repeat.source, repeat.text, repeat.hits) == (direct.source, direct.text, direct.hits)
+            assert not store.tickets()
             continued = respond(store, [
                 user("Кто подписывает агентский договор с физическим лицом?"),
                 {"role": "assistant", "content": direct.text}, user("А с юридическим?"),
