@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 import re
 
-from ollama_api import Decision, Intent, SearchQuery, Verification
+from ollama_api import Clarification, Decision, Intent, SearchQuery, Verification
 from storage import Hit
 
 ROUTE = """Ты консультант по внутренним регламентам. Отвечай по-русски.
@@ -26,7 +26,15 @@ supported=true только если цитата прямо отвечает н
 применима к ситуации сотрудника и не оставляет выбора между вариантами.
 Проверь субъект, действие, ограничения, исключения, сроки и несовместимые правила.
 Учитывай заголовки, а для решения службы качества — утвержденный вопрос (topic).
-Факт из сообщения пользователя не является правилом. При сомнении верни false."""
+Проверь предмет договора, действие, роль и условия. Ответственность за подготовку или
+согласование сама по себе не устанавливает право подписи. Область применения должна
+следовать из источника. В quotes укажи по одной короткой дословной цитате из body каждого
+выбранного фрагмента в том же порядке. При сомнении верни supported=false."""
+
+CLARIFY = """Можно ли выбрать применимое правило, узнав одно недостающее условие?
+Верни номера источников с правилами и один короткий вопрос именно об условии.
+Учитывай все уже сообщённые условия. Не проси назвать ответ на исходный вопрос.
+Если нужного правила вообще нет, верни пустые question и evidence."""
 
 SCOPE = """Классифицируй последнюю реплику. standalone — самостоятельный вопрос о работе
 компании, даже грубо заданный или без известного регламента. followup — короткое
@@ -137,7 +145,11 @@ def respond(store, dialogue, clarifications=0):
     else:
         dialogue = dialogue[-1:]
         clarifications = 0
-    hits = store.search(query)
+    subject = store.model.classify(
+        "Выдели предмет поиска и запрошенное действие в короткой именной фразе. "
+        "Сохрани вид документа или процесса. Опусти частные варианты и не добавляй факты.",
+        {"вопрос": query}, SearchQuery) if store.has_sources() else None
+    hits = store.search(query, subject.query if subject else None)
     context = {"диалог": dialogue, "источники": [
         {"номер": i, **asdict(hit.passage)} for i, hit in enumerate(hits, 1)
     ]}
@@ -157,12 +169,17 @@ def respond(store, dialogue, clarifications=0):
                     continue
                 check = store.model.classify(
                     VERIFY, {**context, "номера_цитат_в_ответе": group}, Verification)
-                if check and check.supported:
+                quotes = [s.strip() for s in check.quotes] if check and check.supported else []
+                if len(quotes) == len(selected) and all(q and q in p.body for q, p in zip(quotes, selected)):
                     origin = "\n".join(" · ".join(filter(None, (p.source, p.location, p.topic))) for p in selected)
-                    return Reply("answer", "\n\n".join(p.body for p in selected), hits, origin,
+                    return Reply("answer", "\n\n".join(quotes), hits, origin,
                                  used=[n-1 for n in group], standalone=(kind == "standalone"))
         elif decision and decision.action == "clarify":
             question = decision.question.strip()
+        if not question and clarifications < store.config.max_clarifications:
+            choice = store.model.classify(CLARIFY, context, Clarification)
+            if choice and choice.evidence and all(1 <= n <= len(hits) for n in choice.evidence):
+                question = choice.question.strip()
         if question:
             repeated = clarifications and question in [m["content"] for m in dialogue[-2:]]
             if (clarifications < store.config.max_clarifications and 3 <= len(question) <= 350

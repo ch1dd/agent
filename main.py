@@ -30,7 +30,8 @@ def show_source(bot, hit, key):
     except ValueError as exc:
         st.caption(str(exc))
     else:
-        st.download_button(f"Скачать {name}", data=path.read_bytes, file_name=name, key=key)
+        st.download_button(f"Скачать {name}", data=lambda: bot.original(hit["version"])[1].read_bytes(),
+                           file_name=name, key=key)
 
 
 def chat(bot):
@@ -78,7 +79,7 @@ def chat(bot):
                 st.text(row["human_answer"])
             elif row["ticket_id"]:
                 st.button("Проверить ответ администратора", key=f"refresh-{row['id']}")
-            elif row["kind"] in {"unknown", "off_topic"} and st.button("Создать заявку админу", key=f"ticket-{row['id']}"):
+            elif not row.get("withdrawn") and row["kind"] in {"unknown", "off_topic"} and st.button("Создать заявку админу", key=f"ticket-{row['id']}"):
                 bot.request_review(owner, active, row["id"])
                 st.rerun()
     pending = st.session_state.get("pending")
@@ -114,6 +115,13 @@ def admin(bot):
         if entered:
             st.error("Ключ не подходит.")
         return
+    from withdrawal import sources
+    names = [r["source"] for r in sources(bot.store)]
+    if names:
+        selected = st.selectbox("Удалить документ и связанные ответы", names, index=None)
+        if st.button("Удалить выбранный документ", disabled=not selected):
+            bot.withdraw(selected)
+            st.rerun()
     files = st.file_uploader("Документы для базы знаний", accept_multiple_files=True,
                              type=sorted(x[1:] for x in SUPPORTED))
     if st.button("Добавить документы", disabled=not files):

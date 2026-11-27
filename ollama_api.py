@@ -15,6 +15,12 @@ class Decision(BaseModel):
 
 class Verification(BaseModel):
     supported: bool
+    quotes: list[str] = Field(default_factory=list)
+
+
+class Clarification(BaseModel):
+    question: str
+    evidence: list[int]
 
 
 class Intent(BaseModel):
@@ -49,7 +55,7 @@ class ModelService:
 
     def classify(self, instruction, data, schema):
         options = {"temperature": 0, "num_ctx": int(os.getenv("RAG_NUM_CTX", "8192")),
-                   "num_predict": 250, "seed": 7}
+                   "num_predict": 750 if schema is Verification else 250, "seed": 7}
         if os.getenv("RAG_NUM_GPU"):
             options["num_gpu"] = int(os.environ["RAG_NUM_GPU"])
         output = self.post("chat", {

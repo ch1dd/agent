@@ -2,6 +2,8 @@
 require __DIR__ . '/auth.php';
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/answer_files.php';
+require_once __DIR__ . '/withdrawals.php';
+clearWithdrawnAnswers($pdo);
 
 $user_id = $_SESSION['user_id'];
 $chat = 'default';

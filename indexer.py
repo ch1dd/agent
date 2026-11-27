@@ -11,11 +11,12 @@ from storage import Store, digest
 from originals import snapshot
 
 
-def prepare(store, source, blob, faq=None):
+def prepare(store, source, blob, faq=None, source_key=None):
     path = store.config.data / "originals" / blob
     parser = "chunks-1300-200-v1"
     version = digest(f"{parser}\0{source}\0{path.stem}")
     with store.db() as conn:
+        conn.execute("INSERT OR IGNORE INTO source_versions VALUES (?,?)", (source_key or source, version))
         known = conn.execute("SELECT 1 FROM originals WHERE version=?", (version,)).fetchone()
         indexed = conn.execute("SELECT 1 FROM active WHERE version=?", (version,)).fetchone()
     if not known and not indexed:
@@ -29,7 +30,7 @@ def prepare(store, source, blob, faq=None):
 def activate_upload(store, name, blob):
     source = f"Загрузки/{name}"
     faq = published_faq(name, store.config.data / "originals" / blob)
-    version = prepare(store, source, blob, faq)
+    version = prepare(store, source, blob, faq, "upload:" + name)
     with store.db() as conn:
         conn.execute("INSERT OR REPLACE INTO originals VALUES (?,?,?)", (version, name, blob))
         conn.execute("INSERT OR REPLACE INTO active VALUES (?,?,'upload')", ("upload:" + name, version))
@@ -54,9 +55,12 @@ def _sync(store, directory):
         raise ValueError("В каталоге нет поддерживаемых документов. Предыдущий индекс сохранён.")
     with store.db() as conn:
         old = dict(conn.execute("SELECT source,version FROM active WHERE kind='file'").fetchall())
+        removed = {r[0] for r in conn.execute("SELECT source FROM withdrawn")}
     active, originals = {}, []
     for path in files:
         source = path.relative_to(directory).as_posix()
+        if source in removed:
+            continue
         with path.open("rb") as stream:
             blob = snapshot(store.config.data, stream, path.suffix)
         version = prepare(store, source, blob)

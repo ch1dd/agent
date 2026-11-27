@@ -7,6 +7,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 verify_csrf();
+require_once __DIR__ . '/withdrawals.php';
+clearWithdrawnAnswers($pdo);
 
 $query_id = (int)($_POST['query_id'] ?? 0);
 $user_id = $_SESSION['user_id'];

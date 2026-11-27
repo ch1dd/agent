@@ -11,7 +11,7 @@ from uuid import uuid4
 from config import Config
 from consultant import Consultant
 from indexer import sync
-from ollama_api import Decision, Intent, SearchQuery, Verification
+from ollama_api import Clarification, Decision, Intent, SearchQuery, Verification
 from storage import Store
 
 
@@ -38,7 +38,9 @@ class Model:
         if schema is SearchQuery:
             return SearchQuery(query="Кто подписывает договор?")
         if schema is Verification:
-            return Verification(supported=True)
+            return Verification(supported=True, quotes=[data["источники"][i-1]["body"] for i in data["номера_цитат_в_ответе"]])
+        if schema is Clarification:
+            return Clarification(question="", evidence=[])
         self.queries.append(data["диалог"])
         unknown = data["диалог"][-1]["content"] == "Срок?"
         return Decision(action="unknown" if unknown else "answer", passage=1, question="")
@@ -143,10 +145,13 @@ class ConsultantTest(unittest.TestCase):
         sync(self.bot.store, self.config.documents)
         for count in (1, 2):
             def classify(instruction, data, schema):
+                if schema is SearchQuery:
+                    return SearchQuery(query="Договор")
                 if schema is Decision:
                     return Decision(action="answer", passage=1, additional=[2], question="")
                 if schema is Verification:
-                    return Verification(supported=len(data["номера_цитат_в_ответе"]) >= count)
+                    indices = data["номера_цитат_в_ответе"]
+                    return Verification(supported=len(indices) >= count, quotes=[data["источники"][i-1]["body"] for i in indices])
                 return Intent(kind="standalone")
             with patch.object(self.model, "classify", side_effect=classify):
                 reply = self.ask(f"Вопрос {count}")
@@ -173,6 +178,21 @@ class ConsultantTest(unittest.TestCase):
         self.assertEqual(reply["text"], "Первый ответ")
         hit = reply["hits"][reply["used"][0]]
         self.assertEqual(self.bot.original(hit["version"])[1].read_text("utf-8"), card)
+
+    def test_withdraw_one_upload_and_replay(self):
+        job = self.bot.upload("faq_ticket_8.txt", io.BytesIO("Вопрос: Код?\n\nОтвет: Альфа".encode()))
+        self.wait_job(job)
+        request = uuid4().hex
+        reply = self.ask("Код?", request=request)
+        hit = reply["hits"][reply["used"][0]]
+        path = self.bot.original(hit["version"])[1]
+        self.bot.withdraw("upload:faq_ticket_8.txt")
+        self.assertFalse(self.bot.store.exact_faq("Код?"))
+        self.assertTrue(self.ask("Код?", request=request)["withdrawn"])
+        self.assertFalse(path.exists())
+        with self.assertRaises(ValueError):
+            self.bot.original(hit["version"])
+        self.assertTrue(self.bot.store.has_sources())
 
     def test_http_roles_and_mysql_context_contract(self):
         from starlette.testclient import TestClient

@@ -3,6 +3,20 @@ require __DIR__ . '/auth.php';
 requireAdmin();
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/rag_client.php';
+require_once __DIR__ . '/withdrawals.php';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verify_csrf();
+    $links = $pdo->query("SELECT t.id AS ticket,t.user_id AS `user`,q.request_id AS request
+        FROM tickets t JOIN queries q ON q.id=t.query_id AND q.user_id=t.user_id
+        WHERE q.request_id IS NOT NULL AND t.job_id IS NOT NULL")->fetchAll(PDO::FETCH_ASSOC);
+    rag('/admin/documents', ['source' => $_POST['source'] ?? '', 'links' => $links], true);
+    clearWithdrawnAnswers($pdo);
+    header('Location: admin.php');
+    exit;
+}
+clearWithdrawnAnswers($pdo);
+$documents = rag('/admin/documents', null, true);
 
 $users = $pdo->query("SELECT id, email, role, created_at FROM users ORDER BY created_at DESC")->fetchAll();
 
@@ -41,6 +55,17 @@ try {
         </nav>
     </header>
     <main>
+        <div class="card">
+            <h2>Документы базы знаний</h2>
+            <?php foreach ($documents as $doc): ?>
+                <form method="post" onsubmit="return confirm('Удалить этот источник, его редакции и связанные ответы?')">
+                    <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                    <input type="hidden" name="source" value="<?= htmlspecialchars($doc['source'], ENT_QUOTES) ?>">
+                    <?= htmlspecialchars($doc['source']) ?>
+                    <button type="submit">Удалить</button>
+                </form>
+            <?php endforeach; ?>
+        </div>
         <div class="card">
             <h1>Панель администратора</h1>
             <p style="color: var(--text-secondary); margin-top: 8px;">

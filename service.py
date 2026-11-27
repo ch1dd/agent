@@ -21,6 +21,8 @@ from storage import Store
 
 
 class Previous(BaseModel):
+    request: str | None = None
+    depends_on: list[str] | None = None
     question: str = Field(max_length=2000)
     text: str = Field(max_length=12000)
     kind: Literal["answer", "clarify", "unknown", "off_topic"]
@@ -83,12 +85,42 @@ async def upload(request):
                 return JSONResponse({"error": "Максимальный размер файла 64 МиБ."}, status_code=413)
             stream.write(block)
         stream.seek(0)
-        job = await run_in_threadpool(request.app.state.bot.upload, name, stream)
+        job = await run_in_threadpool(request.app.state.bot.upload, name, stream,
+                                      request.query_params.get("owner", ""), request.query_params.get("request", ""))
     return JSONResponse({"job_id": job}, status_code=202)
 
 
 async def jobs(request):
     return JSONResponse(await run_in_threadpool(request.app.state.bot.jobs))
+
+
+class PublicationLink(BaseModel):
+    ticket: int = Field(gt=0)
+    user: int = Field(gt=0)
+    request: str
+
+
+class Withdraw(BaseModel):
+    source: str
+    links: list[PublicationLink] = Field(default_factory=list)
+
+
+async def documents(request):
+    from withdrawal import sources
+    bot = request.app.state.bot
+    if request.method == "GET":
+        return JSONResponse(await run_in_threadpool(sources, bot.store))
+    data = Withdraw.model_validate(await request.json())
+    links = [(f"upload:faq_ticket_{r.ticket}.txt", f"site:{r.user}", r.request) for r in data.links]
+    await run_in_threadpool(bot.withdraw, data.source, links)
+    return JSONResponse({"removed": True})
+
+
+async def removed_answers(request):
+    with request.app.state.bot.store.db() as conn:
+        rows = conn.execute("""SELECT owner,request FROM turns WHERE owner LIKE 'site:%'
+            AND json_extract(result,'$.withdrawn')=1""").fetchall()
+    return JSONResponse([dict(r) for r in rows])
 
 
 def create_app(bot=None):
@@ -110,6 +142,8 @@ def create_app(bot=None):
     routes = [Route("/ask", ask, methods=["POST"]), Route("/originals/{version}", original),
               Route("/tickets/{number:int}", ticket), Route("/admin/tickets", tickets),
               Route("/admin/tickets/{number:int}", review, methods=["POST"]),
+              Route("/admin/documents", documents, methods=["GET","POST"]),
+              Route("/admin/removed-answers", removed_answers),
               Route("/admin/uploads", upload, methods=["POST"]), Route("/admin/jobs", jobs)]
     app = Starlette(routes=routes, lifespan=lifespan)
 

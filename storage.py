@@ -68,6 +68,13 @@ class Store:
                 CREATE TABLE IF NOT EXISTS turns (
                     id INTEGER PRIMARY KEY, owner TEXT NOT NULL, chat TEXT NOT NULL, request TEXT NOT NULL,
                     question TEXT NOT NULL, result TEXT NOT NULL, UNIQUE(owner,chat,request));
+                CREATE TABLE IF NOT EXISTS withdrawn(source TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS source_versions(
+                    source TEXT, version TEXT, PRIMARY KEY(source,version));
+                CREATE TABLE IF NOT EXISTS revoked(version TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS garbage(version TEXT PRIMARY KEY, blob TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS publication_links(
+                    source TEXT, owner TEXT, request TEXT, PRIMARY KEY(source,owner,request));
             """)
             if "basis" not in {r[1] for r in conn.execute("PRAGMA table_info(turns)")}:
                 conn.execute("ALTER TABLE turns ADD COLUMN basis TEXT")
@@ -151,13 +158,15 @@ class Store:
     def basis(self):
         with self.db() as conn:
             versions = [row[0] for row in conn.execute("SELECT version FROM active ORDER BY source")]
-        return digest(json.dumps(["verified-answer-v2", self.config.model, self.config.top_k, versions]))
+        return digest(json.dumps(["verified-answer-v3", self.config.model, self.config.top_k, versions]))
 
-    def search(self, query):
+    def search(self, query, subject=None):
         if not self.has_sources():
             return []
-        vector, = self.model.embed([query])
-        keys = lexical(query)
+        queries = list(dict.fromkeys(q for q in (query, subject) if q))
+        signals = []
+        for text, vector in zip(queries, self.model.embed(queries)):
+            signals.extend([("dense", vector), ("words", lexical(text))])
         candidates = {}
         with self.lock:
             with self.db() as conn:
@@ -165,8 +174,8 @@ class Store:
             if not versions:
                 return []
             scope = qm.Filter(must=[qm.FieldCondition(key="version", match=qm.MatchAny(any=versions))])
-            for channel, signal in (("dense", vector), ("words", keys)):
-                if channel == "words" and not keys.indices:
+            for channel, signal in signals:
+                if channel == "words" and not signal.indices:
                     continue
                 points = self.client.query_points(
                     self.config.collection, query=signal, using=channel, query_filter=scope,
@@ -180,9 +189,9 @@ class Store:
                     hit = candidates[point.id]
                     hit.score += 1 / (60 + rank)
                     if channel == "words":
-                        hit.lexical_rank = rank
+                        hit.lexical_rank = min(rank, hit.lexical_rank or rank)
                     else:
-                        hit.dense_rank = rank
+                        hit.dense_rank = min(rank, hit.dense_rank or rank)
         return sorted(candidates.values(), key=lambda h: h.score, reverse=True)[:self.config.top_k]
 
     def ticket(self, dialogue, ref, owner=""):
@@ -193,7 +202,7 @@ class Store:
 
     def tickets(self):
         with self.db() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM tickets ORDER BY id DESC")]
+            return [dict(row) for row in conn.execute("SELECT * FROM tickets WHERE publication<>'withdrawn' ORDER BY id DESC")]
 
     def review(self, ticket_id, topic, answer, reviewer, publish, revision):
         topic, answer, reviewer = (s.strip() for s in (topic, answer, reviewer))
@@ -202,7 +211,7 @@ class Store:
         with self.db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             saved = conn.execute("""UPDATE tickets SET reviewer=?,topic=?,answer=?,resolved=CURRENT_TIMESTAMP,
-                                 publication=?,revision=revision+1 WHERE id=? AND revision=?""",
+                                 publication=?,revision=revision+1 WHERE id=? AND revision=? AND publication<>'withdrawn'""",
                                  (reviewer, topic, answer, "pending" if publish else "private", ticket_id, revision))
             if not saved.rowcount:
                 raise ValueError("Заявка изменилась. Обновите её перед сохранением.")
@@ -225,6 +234,7 @@ class Store:
             updated = conn.execute("UPDATE tickets SET publication='published' WHERE id=? AND revision=?",
                                    (ticket_id, revision))
             if updated.rowcount:
+                conn.execute("INSERT OR IGNORE INTO source_versions VALUES (?,?)", (f"quality:{ticket_id}", version))
                 conn.execute("INSERT OR REPLACE INTO originals VALUES (?,?,?)", (version, f"Решение-{ticket_id}.txt", blob))
                 conn.execute("INSERT OR REPLACE INTO active VALUES (?,?,?)", (f"quality:{ticket_id}", version, "quality"))
                 self.record_faq(conn, version, source, row["topic"], row["answer"])

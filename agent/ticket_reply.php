@@ -3,6 +3,8 @@ require __DIR__ . '/auth.php';
 requireAdmin();
 require __DIR__ . '/db.php';
 require_once __DIR__ . '/rag_client.php';
+require_once __DIR__ . '/withdrawals.php';
+clearWithdrawnAnswers($pdo);
 
 $ticket_id = (int)($_GET['id'] ?? 0);
 if ($ticket_id <= 0) {
@@ -10,7 +12,8 @@ if ($ticket_id <= 0) {
     exit('Неверный ID заявки');
 }
 
-$stmt = $pdo->prepare("SELECT t.*, u.email FROM tickets t JOIN users u ON t.user_id = u.id WHERE t.id = ?");
+$stmt = $pdo->prepare("SELECT t.*, u.email,q.request_id FROM tickets t JOIN users u ON t.user_id = u.id
+    JOIN queries q ON q.id=t.query_id AND q.user_id=t.user_id WHERE t.id = ?");
 $stmt->execute([$ticket_id]);
 $ticket = $stmt->fetch();
 
@@ -47,7 +50,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 file_put_contents($tempFile, $faqContent);
                 
                 // Загружаем через /admin/uploads
-                $ch = curl_init('http://127.0.0.1:8765/admin/uploads?name=' . rawurlencode($faqFilename));
+                $ch = curl_init('http://127.0.0.1:8765/admin/uploads?' . http_build_query([
+                    'name' => $faqFilename, 'owner' => 'site:' . $ticket['user_id'], 'request' => $ticket['request_id']
+                ]));
                 $fp = fopen($tempFile, 'rb');
                 $fileSize = filesize($tempFile);
                 
