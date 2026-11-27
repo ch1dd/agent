@@ -11,20 +11,22 @@ verify_csrf();
 $query_id = (int)($_POST['query_id'] ?? 0);
 $user_id = $_SESSION['user_id'];
 
-// Получаем текст вопроса
-$stmt = $pdo->prepare("SELECT question FROM queries WHERE id = ? AND user_id = ?");
-$stmt->execute([$query_id, $user_id]);
-$row = $stmt->fetch();
-
-if (!$row) {
-    http_response_code(404);
-    exit('Запрос не найден');
-}
-
 try {
     $pdo->beginTransaction();
-    
-    // 1. Создаём заявку в таблице tickets
+    $stmt = $pdo->prepare("SELECT q.question,q.rag_result,t.id AS existing_ticket FROM queries q
+        LEFT JOIN tickets t ON t.id=q.ticket_id AND t.query_id=q.id AND t.user_id=q.user_id
+        WHERE q.id=? AND q.user_id=? FOR UPDATE");
+    $stmt->execute([$query_id, $user_id]);
+    $row = $stmt->fetch();
+    if (!$row || !in_array(json_decode($row['rag_result'] ?? '', true)['kind'] ?? '', ['unknown','off_topic'], true)) {
+        throw new RuntimeException('Вопрос для заявки не найден.');
+    }
+    if ($row['existing_ticket']) {
+        $pdo->commit();
+        header('Location: dashboard.php');
+        exit;
+    }
+
     $stmt = $pdo->prepare("INSERT INTO tickets (user_id, query_id, question, status) VALUES (?, ?, ?, 'open')");
     $stmt->execute([$user_id, $query_id, $row['question']]);
     $ticket_id = $pdo->lastInsertId();

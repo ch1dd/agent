@@ -14,7 +14,8 @@ answer: фрагмент или сочетание нескольких фраг
 нет противоречий. Укажи основной номер (начиная с 1). В additional укажи только
 нужные для других частей вопроса номера. Выбранные цитаты будут показаны дословно.
 clarify: в источниках есть применимые правила, но выбор зависит от неизвестного
-параметра. Задай один короткий вопрос об этом параметре, без ответа и советов.
+параметра. Спроси у сотрудника только недостающее условие, например «Договор с физическим
+или юридическим лицом?». Не проси его назвать подписанта, если он сам спрашивает, кто подписывает.
 unknown: отсутствует нужный факт, есть неразрешимый конфликт, либо после уточнения
 условия не выполняются. Не задавай уточнение, если ответ отсутствует при любом варианте.
 Сходная тема сама по себе недостаточна. Не додумывай сроки, суммы и полномочия."""
@@ -29,13 +30,15 @@ supported=true только если цитата прямо отвечает н
 
 SCOPE = """Классифицируй последнюю реплику. standalone — самостоятельный вопрос о работе
 компании, даже грубо заданный или без известного регламента. followup — короткое
-продолжение, например «А с юридическим?» или «С юрлицом». off_topic — оскорбление без рабочего
+продолжение, например «А с юридическим?» или «С юрлицом». Если передан уточняющий вопрос
+агента, выбор одного варианта или ответ на запрошенное условие — followup, даже в одно слово.
+off_topic — оскорбление без рабочего
 вопроса, бессмыслица, игры, стихи, общие знания и посторонние просьбы. Не придумывай
 рабочий смысл такому сообщению из истории. Не отвечай на вопрос."""
 OUTSIDE = "Я отвечаю на вопросы о процессах компании. Уточните, какой рабочий процесс вас интересует."
 
 
-def message_kind(model, query):
+def message_kind(model, query, pending=None):
     words = " ".join(re.findall(r"[\w]+", query.casefold()))
     # Clear standalone procedural questions need no model rewrite or history.
     asks = re.match(r"^(?:(?:подскажите|пожалуйста|скажите|а)\s+)*(кто|где|когда|кому|како\w*|сколько|в чем)\b", words)
@@ -45,7 +48,14 @@ def message_kind(model, query):
         return "standalone"
     if re.fullmatch(r"(соси (хуй|х3уй)|иди на хуй|привет|спасибо)", words):
         return "off_topic"
-    intent = model.classify(SCOPE, {"реплика": query}, Intent)
+    data = {"реплика": query}
+    if pending:
+        # Recognise a short choice even when its Russian case ending differs.
+        options = {w[:5] for w in re.findall(r"\w{5,}", pending.casefold())}
+        if len(words.split()) <= 4 and not asks and any(w[:5] in options for w in words.split()):
+            return "followup"
+        data["уточняющий вопрос агента"] = pending
+    intent = model.classify(SCOPE, data, Intent)
     if intent is None:
         raise RuntimeError("Не удалось определить тему запроса. Повторите вопрос.")
     return intent.kind
@@ -101,19 +111,27 @@ def branch_question(selected, hits, dialogue, cited=()):
     return ""
 
 
-def respond(store, dialogue, ref, clarifications=0, owner=""):
+def respond(store, dialogue, clarifications=0):
     dialogue = dialogue[-store.config.context_messages:]
     query = dialogue[-1]["content"]
-    # Determine scope before reading history. Identical standalone inputs reach
-    # retrieval, routing and verification with identical prompts.
-    kind = message_kind(store.model, query)
+    exact = store.exact_faq(query)
+    if exact:
+        if len({h.passage.body for h in exact}) > 1:
+            return Reply("unknown", "Опубликованные решения расходятся. Можно обратиться в службу качества.", exact)
+        return Reply("answer", exact[0].passage.body, exact, exact[0].passage.source, used=[0], standalone=True)
+    pending = dialogue[-2]["content"] if clarifications and len(dialogue) >= 2 else None
+    kind = message_kind(store.model, query, pending)
     if kind == "off_topic":
         return Reply("off_topic", OUTSIDE, [])
     if kind == "followup" and len(dialogue) > 1:
-        rewrite = store.model.classify("Восстанови самостоятельный поисковый запрос из диалога. "
+        if pending:
+            # Keep the original subject and put the employee's selected option last.
+            query = "\n".join(m["content"] for m in dialogue[-3:])
+        else:
+            rewrite = store.model.classify("Восстанови самостоятельный поисковый запрос из диалога. "
                                        "Сохрани условия и названия. Не отвечай.", {"диалог": dialogue}, SearchQuery)
-        if rewrite:
-            query = rewrite.query
+            if rewrite:
+                query = rewrite.query
     elif kind == "followup":
         return Reply("clarify", "О каком процессе или документе вы спрашиваете?", [])
     else:
@@ -150,6 +168,5 @@ def respond(store, dialogue, ref, clarifications=0, owner=""):
             if (clarifications < store.config.max_clarifications and 3 <= len(question) <= 350
                     and question.endswith("?") and not repeated):
                 return Reply("clarify", question, hits)
-    number = store.ticket(dialogue, ref, owner)
-    return Reply("unknown", f"Не удалось подтвердить однозначный ответ. В службу качества "
-                 f"передана заявка №{number}. Здесь появится решение специалиста.", hits, ticket_id=number)
+    return Reply("unknown", "Не удалось подтвердить однозначный ответ по базе знаний. "
+                 "Вы можете отправить вопрос в службу качества.", hits)

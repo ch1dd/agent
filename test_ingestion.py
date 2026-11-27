@@ -53,6 +53,19 @@ class IngestionTest(unittest.TestCase):
         self.assertEqual((p1.body, p2.body), (self.line, second))
         self.assertIn("стр. 2", p2.location)
 
+    def test_overlap_within_section(self):
+        path = self.root / "длинный.md"
+        body = " ".join(f"пункт{i}" for i in range(420))
+        path.write_text("# Первая часть\n" + body + "\n# Вторая часть\nКороткий ответ.", encoding="utf-8")
+        *chunks, last = self.read(path)
+        self.assertGreater(len(chunks), 1)
+        rebuilt = chunks[0].body
+        for previous, current in zip(chunks, chunks[1:]):
+            self.assertEqual(previous.body[-200:], current.body[:200])
+            rebuilt += current.body[200:]
+        self.assertEqual(rebuilt, body)
+        self.assertEqual(last.body, "Короткий ответ.")
+
     def test_native_and_scanned_pdf(self):
         writer = PdfWriter()
         native = writer.add_blank_page(600, 400)

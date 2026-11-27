@@ -38,7 +38,10 @@ def run():
             question = "Где хранится бумажный оригинал агентского договора?"
             missing = ask(bot, question, "unknown", chat="three")
             approved = "Бумажный оригинал агентского договора хранится в архиве договорного отдела."
-            job = bot.store.review(missing["ticket_id"], question, approved, "Участник демо", True, 0)
+            assert missing["ticket_id"] is None
+            turn = bot.history("employee", "three")[-1]
+            ticket = bot.request_review("employee", "three", turn["id"])
+            job = bot.store.review(ticket, question, approved, "Участник демо", True, 0)
             bot.wake.set()
             end = monotonic() + 300
             while monotonic() < end:

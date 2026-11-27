@@ -132,6 +132,29 @@ class Consultant:
                 ORDER BY t.id DESC LIMIT ?""", (owner, chat, self.store.config.context_messages)).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    def request_review(self, owner, chat, turn_id):
+        with self.store.db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            turn = conn.execute("SELECT * FROM turns WHERE owner=? AND chat=? AND id=?",
+                                (owner, chat, turn_id)).fetchone()
+            if not turn:
+                raise ValueError("Вопрос не найден.")
+            result = json.loads(turn["result"])
+            if result["ticket_id"]:
+                return result["ticket_id"]
+            if result["kind"] not in {"unknown", "off_topic"}:
+                raise ValueError("Для этого ответа заявка не требуется.")
+            recent = conn.execute("""SELECT question,result FROM turns WHERE owner=? AND chat=? AND id<?
+                                  ORDER BY id DESC LIMIT ?""", (owner, chat, turn_id, self.store.config.context_messages))
+            rows = [dict(json.loads(r["result"]), question=r["question"]) for r in recent]
+            messages, _ = context(reversed(rows), self.store.config.context_messages - 1)
+            messages.append({"role": "user", "content": turn["question"]})
+            number = conn.execute("INSERT INTO tickets(ref,dialogue,owner) VALUES (?,?,?)",
+                                  (digest(json.dumps([owner, chat, turn["request"]])), json.dumps(messages, ensure_ascii=False), owner)).lastrowid
+            result["ticket_id"] = number
+            conn.execute("UPDATE turns SET result=? WHERE id=?", (json.dumps(result, ensure_ascii=False), turn_id))
+            return number
+
     def ask(self, owner, chat, question, request, previous=None):
         question = question.strip()
         if not owner or not chat or not 1 <= len(question) <= 2000:
@@ -149,15 +172,14 @@ class Consultant:
             with self.store.db() as conn:
                 verified = conn.execute("""SELECT result FROM turns WHERE owner=? AND chat=? AND question=?
                                         AND basis=? ORDER BY id DESC LIMIT 1""", (owner, chat, question, basis)).fetchone()
-            if verified:
+            rows = self.recent(owner, chat) if previous is None else previous
+            messages, count = context(rows, self.store.config.context_messages)
+            if verified and not count:
                 result = json.loads(verified["result"])
             else:
                 # PHP supplies authoritative recent MySQL rows. Streamlit reads its local history.
-                rows = self.recent(owner, chat) if previous is None else previous
-                messages, count = context(rows, self.store.config.context_messages)
                 messages.append({"role": "user", "content": question})
-                ref = digest(json.dumps([owner, chat, request]))
-                result = asdict(respond(self.store, messages, ref, count, owner))
+                result = asdict(respond(self.store, messages, count))
                 if not result["standalone"] or self.store.basis() != basis:
                     basis = None
             with self.store.db() as conn:

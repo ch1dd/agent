@@ -8,7 +8,7 @@ $users = $pdo->query("SELECT id, email, role, created_at FROM users ORDER BY cre
 
 // Загрузка списка заявок
 $stmt = $pdo->query("
-    SELECT t.id, t.question, t.status, t.created_at, u.email as user_email 
+    SELECT t.id, t.question, t.status, t.job_id, t.created_at, u.email as user_email
     FROM tickets t
     JOIN users u ON t.user_id = u.id
     ORDER BY t.created_at DESC
@@ -18,7 +18,7 @@ $tickets = $stmt->fetchAll();
 $jobs = [];
 $jobsError = null;
 try {
-    $jobs = rag('/admin/jobs', null, true);
+    $jobs = array_column(rag('/admin/jobs', null, true), null, 'id');
 } catch (Exception $e) {
     $jobsError = $e->getMessage();
 }
@@ -99,7 +99,9 @@ try {
                         </td>
                         <td>
                             <?php if (!empty($ticket['job_id'])): ?>
-                                <span style="color: var(--primary);">📤 Индексируется</span>
+                                <?php $job = $jobs[$ticket['job_id']] ?? []; ?>
+                                №<?= (int)$ticket['job_id'] ?> · <?= htmlspecialchars(['done'=>'Опубликовано','queued'=>'В очереди','running'=>'Индексируется','failed'=>'Ошибка'][$job['status'] ?? ''] ?? 'Статус недоступен') ?>
+                                <?= htmlspecialchars($job['error'] ?? '') ?>
                             <?php else: ?>
                                 <span style="color: var(--text-secondary);">—</span>
                             <?php endif; ?>

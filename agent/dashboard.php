@@ -1,6 +1,7 @@
 <?php
 require __DIR__ . '/auth.php';
 require __DIR__ . '/db.php';
+require_once __DIR__ . '/answer_files.php';
 
 $user_id = $_SESSION['user_id'];
 $chat = 'default';
@@ -10,10 +11,10 @@ $ticketError = $_SESSION['ticket_error'] ?? null;
 unset($_SESSION['ticket_error']);
 
 $stmt = $pdo->prepare("
-    SELECT q.id, q.question, q.answer, q.rag_result, q.ticket_id, q.created_at,
-           t.status AS ticket_status, t.admin_answer, t.updated_at AS ticket_updated_at
+    SELECT q.id, q.question, q.answer, q.rag_result, q.files_json, q.ticket_id, q.created_at,
+           t.status AS ticket_status, t.admin_answer, t.id AS manual_ticket
     FROM queries q
-    LEFT JOIN tickets t ON q.ticket_id = t.id
+    LEFT JOIN tickets t ON q.ticket_id = t.id AND t.user_id = q.user_id AND t.query_id = q.id
     WHERE q.user_id = ? AND q.chat_id = ? 
     ORDER BY q.id DESC
 ");
@@ -53,7 +54,8 @@ $queries = $stmt->fetchAll();
 <div class="sticky-question-form">
     <div class="card">
         <h2>Задать вопрос агенту</h2>
-        <form id="questionForm" onsubmit="return submitQuestion(event)">
+        <form id="questionForm" action="query.php" method="post" onsubmit="return submitQuestion(event)">
+            <input type="hidden" name="request_id" value="<?= bin2hex(random_bytes(16)) ?>">
             <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
             <div class="form-group">
                 <textarea id="questionInput" name="question" rows="3" 
@@ -73,7 +75,55 @@ $queries = $stmt->fetchAll();
     <h2>История запросов</h2>
     <div id="historyContainer">
         <?php if (count($queries) > 0): ?>
-            <!-- ... ваш существующий код вывода истории ... -->
+            <?php foreach ($queries as $row):
+                $result = json_decode($row['rag_result'] ?? '', true) ?: [];
+                $files = json_decode($row['files_json'] ?? '', true) ?: answer_files($result);
+                $qid = (int)$row['id'];
+            ?>
+            <article class="query-item">
+                <div class="query-label">Вопрос</div>
+                <p><?= nl2br(htmlspecialchars($row['question'])) ?></p>
+                <div class="query-label answer">Ответ</div>
+                <p><?= nl2br(htmlspecialchars($row['answer'] ?? '')) ?></p>
+                <?php foreach ($files as $file): ?>
+                    <?php if (empty($file['version']) || empty($file['name'])) continue; ?>
+                    <p><a href="download.php?query_id=<?= $qid ?>&amp;version=<?= rawurlencode($file['version']) ?>">Скачать <?= htmlspecialchars($file['name']) ?></a>
+                       · <?= htmlspecialchars($file['location'] ?? '') ?></p>
+                <?php endforeach; ?>
+                <?php if (!empty($result['hits'])): ?>
+                    <details><summary>Ранжирование источников</summary><ol>
+                    <?php foreach ($result['hits'] as $i => $hit): ?>
+                        <li><?= htmlspecialchars($hit['passage']['source'] . ' · ' . $hit['passage']['location']) ?>
+                            · <?= $hit['dense_rank'] === null && $hit['lexical_rank'] === null ? 'Точное совпадение' : 'RRF ' . number_format($hit['score'], 4) ?>
+                            <?= in_array($i, $result['used'] ?? [], true) ? ' · в ответе' : '' ?></li>
+                    <?php endforeach; ?>
+                    </ol></details>
+                <?php endif; ?>
+                <?php if ($row['manual_ticket']): ?>
+                    <p>Заявка №<?= (int)$row['manual_ticket'] ?></p>
+                    <?php if ($row['admin_answer'] !== null): ?>
+                        <strong>Ответ администратора</strong><p><?= nl2br(htmlspecialchars($row['admin_answer'])) ?></p>
+                    <?php endif; ?>
+                <?php elseif (in_array($result['kind'] ?? '', ['unknown', 'off_topic'], true)): ?>
+                    <form method="post" action="create_ticket.php">
+                        <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                        <input type="hidden" name="query_id" value="<?= $qid ?>">
+                        <button type="submit">Создать заявку админу</button>
+                    </form>
+                    <?php if ($email = filter_var(getenv('QUALITY_EMAIL'), FILTER_VALIDATE_EMAIL)): ?>
+                        <a href="mailto:<?= htmlspecialchars($email) ?>?subject=<?= rawurlencode($row['question']) ?>">На почту</a>
+                    <?php endif; ?>
+                <?php endif; ?>
+                <div class="query-meta">
+                    <time><?= htmlspecialchars($row['created_at']) ?></time>
+                    <form method="post" action="delete_query.php">
+                        <input type="hidden" name="csrf_token" value="<?= csrf_token() ?>">
+                        <input type="hidden" name="query_id" value="<?= $qid ?>">
+                        <button type="submit">Удалить</button>
+                    </form>
+                </div>
+            </article>
+            <?php endforeach; ?>
         <?php else: ?>
             <div class="empty-state"><p>История запросов пуста</p></div>
         <?php endif; ?>
@@ -90,7 +140,7 @@ async function submitQuestion(event) {
     const loader = document.getElementById('loadingIndicator');
     
     const question = input.value.trim();
-    if (!question) return false;
+    if (!question || btn.disabled) return false;
     
     // Блокируем форму
     btn.disabled = true;
@@ -98,7 +148,11 @@ async function submitQuestion(event) {
     
     try {
         const formData = new FormData(form);
-        formData.append('request_id', generateRequestId());
+        if (form.dataset.lastQuestion && form.dataset.lastQuestion !== question) {
+            form.elements.request_id.value = generateRequestId();
+            formData.set('request_id', form.elements.request_id.value);
+        }
+        form.dataset.lastQuestion = question;
         
         const response = await fetch('query_ajax.php', {
             method: 'POST',
@@ -110,9 +164,7 @@ async function submitQuestion(event) {
         const result = await response.json();
         
         if (result.success) {
-            // Добавляем новый вопрос в начало истории
-            prependToHistory(result.query);
-            input.value = '';
+            window.location.replace('dashboard.php');
         } else {
             alert('Ошибка: ' + (result.error || 'Неизвестная ошибка'));
         }
@@ -132,67 +184,15 @@ function generateRequestId() {
         .join('');
 }
 
-function prependToHistory(query) {
-    const container = document.getElementById('historyContainer');
-    const emptyState = container.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-    
-    const queryHtml = `
-        <div class="query-item" style="animation: fadeIn 0.5s;">
-            <div>
-                <div class="query-label">Вопрос:</div>
-                <p>${escapeHtml(query.question).replace(/\n/g, '<br>')}</p>
-            </div>
-            <div style="margin-top: 12px;">
-                <div class="query-label answer">Ответ:</div>
-                <p style="color: var(--text-secondary);">${escapeHtml(query.answer).replace(/\n/g, '<br>')}</p>
-            </div>
-            <div class="query-meta">
-                <span class="query-time">Только что</span>
-            </div>
-        </div>
-    `;
-    
-    container.insertAdjacentHTML('afterbegin', queryHtml);
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // Enter для отправки
 document.getElementById('questionInput').addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        document.getElementById('questionForm').dispatchEvent(new Event('submit'));
+        document.getElementById('questionForm').requestSubmit();
     }
 });
 </script>
 
-<style>
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-</style>
 
-    <script>
-        // Enter для отправки, Shift+Enter для переноса
-        document.getElementById('questionInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                document.getElementById('questionForm').submit();
-            }
-        });
-
-        // Показ индикатора загрузки
-        function showLoading() {
-            document.getElementById('loadingIndicator').style.display = 'flex';
-            document.getElementById('submitBtn').disabled = true;
-            return true;
-        }
-    </script>
 </body>
 </html>

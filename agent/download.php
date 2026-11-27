@@ -4,9 +4,9 @@ require __DIR__ . '/db.php';
 require_once __DIR__ . '/rag_client.php';
 
 $query_id = (int)($_GET['query_id'] ?? 0);
-$version = (int)($_GET['version'] ?? 0);
+$version = $_GET['version'] ?? '';
 
-if ($query_id <= 0 || $version <= 0) {
+if ($query_id <= 0 || !is_string($version) || !preg_match('/^[a-f0-9]{64}$/D', $version)) {
     http_response_code(400);
     exit('Неверные параметры');
 }
@@ -24,7 +24,8 @@ $rag = json_decode($row['rag_result'], true);
 $hits = $rag['hits'] ?? [];
 
 $found = null;
-foreach ($hits as $hit) {
+foreach ($rag['used'] ?? [] as $index) {
+    $hit = $hits[$index] ?? [];
     if (($hit['version'] ?? null) === $version) {
         $found = $hit;
         break;
@@ -36,43 +37,39 @@ if (!$found) {
     exit('Источник не найден');
 }
 
-try {
-    $ch = curl_init('http://127.0.0.1:8765/originals/' . $version);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . RAG_API_TOKEN],
-        CURLOPT_TIMEOUT => 60,
-        CURLOPT_HEADER => true,
-    ]);
-    
-    $response = curl_exec($ch);
-    $code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    curl_close($ch);
-    
-    if ($code !== 200) {
-        http_response_code(404);
-        exit('Файл недоступен');
-    }
-    
-    $headers = substr($response, 0, $headerSize);
-    $body = substr($response, $headerSize);
-    
-    $contentType = 'application/octet-stream';
-    $filename = 'document';
-    if (preg_match('/Content-Type:\s*(.+)/i', $headers, $m)) {
-        $contentType = trim($m[1]);
-    }
-    if (preg_match('/Content-Disposition:.*filename="?([^";\n]+)"?/i', $headers, $m)) {
-        $filename = trim($m[1]);
-    }
-    
-    header('Content-Type: ' . $contentType);
-    header('Content-Disposition: attachment; filename="' . basename($filename) . '"');
-    header('Content-Length: ' . strlen($body));
-    echo $body;
-    exit;
-} catch (Exception $e) {
+session_write_close();
+$file = tmpfile();
+if ($file === false) {
     http_response_code(500);
-    exit('Ошибка скачивания');
+    exit('Не удалось подготовить файл');
 }
+
+$ch = curl_init('http://127.0.0.1:8765/originals/' . $version);
+$disposition = "attachment; filename*=UTF-8''" . rawurlencode(basename($found['passage']['source']));
+curl_setopt_array($ch, [
+    CURLOPT_FILE => $file,
+    CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . RAG_API_TOKEN],
+    CURLOPT_TIMEOUT => 60,
+    CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$disposition) {
+        if (preg_match('/^Content-Disposition:\s*(attachment[^\r\n]*)/i', $line, $m)) {
+            $disposition = trim($m[1]);
+        }
+        return strlen($line);
+    },
+]);
+$ok = curl_exec($ch);
+$code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+curl_close($ch);
+if (!$ok || $code !== 200) {
+    fclose($file);
+    http_response_code(404);
+    exit('Файл недоступен');
+}
+
+rewind($file);
+header('Content-Type: application/octet-stream');
+header('Content-Disposition: ' . $disposition);
+header('Cache-Control: private, no-store');
+header('Content-Length: ' . fstat($file)['size']);
+fpassthru($file);
+fclose($file);

@@ -111,7 +111,11 @@ class ConsultantTest(unittest.TestCase):
         self.assertEqual(self.bot.original(version)[1].read_text("utf-8"), reply["text"])
 
     def test_private_reply_publication_retry_and_revision(self):
-        ticket = self.ask("Срок?")["ticket_id"]
+        self.assertIsNone(self.ask("Срок?")["ticket_id"])
+        self.assertFalse(self.bot.store.tickets())
+        turn = self.bot.history("alice", "one")[-1]["id"]
+        ticket = self.bot.request_review("alice", "one", turn)
+        self.assertEqual(ticket, self.bot.request_review("alice", "one", turn))
         store = self.bot.store
         self.assertIsNone(store.review(ticket, "Срок?", "Частный ответ", "Анна", False, 0))
         self.assertEqual(self.bot.history("alice", "one")[0]["human_answer"], "Частный ответ")
@@ -151,6 +155,25 @@ class ConsultantTest(unittest.TestCase):
                 hit = reply["hits"][index]
                 self.assertIn(self.bot.original(hit["version"])[1].read_text("utf-8"), reply["text"])
 
+    def test_short_choice_uses_pending_mysql_question(self):
+        previous = [dict(question="Кто подписывает договор?", text="С физическим или юридическим лицом?", kind="clarify")]
+        reply = self.bot.ask("site:1", "default", "физическое", uuid4().hex, previous)
+        self.assertEqual(reply["kind"], "answer")
+        self.assertEqual([m["content"] for m in self.model.queries[-1]],
+                         [previous[0]["question"], previous[0]["text"], "физическое"])
+
+    def test_published_site_faq_precedes_scope_and_survives_restart(self):
+        card = "Вопрос: lfqasdasd\n\nОтвет: Первый ответ\n"
+        job = self.bot.upload("faq_ticket_7.txt", io.BytesIO(card.encode()))
+        self.wait_job(job)
+        self.bot.close()
+        self.bot = Consultant(Store(self.config, self.model))
+        with patch.object(self.model, "classify", side_effect=AssertionError("unexpected model call")):
+            reply = self.ask("LFQASDASD", owner="bob")
+        self.assertEqual(reply["text"], "Первый ответ")
+        hit = reply["hits"][reply["used"][0]]
+        self.assertEqual(self.bot.original(hit["version"])[1].read_text("utf-8"), card)
+
     def test_http_roles_and_mysql_context_contract(self):
         from starlette.testclient import TestClient
         from service import create_app
@@ -162,7 +185,9 @@ class ConsultantTest(unittest.TestCase):
             self.assertEqual(client.get("/admin/jobs", headers=user).status_code, 403)
             data = dict(owner="site:1", chat="default", request=uuid4().hex, question="Срок?", previous=[])
             reply = client.post("/ask", headers=user, json=data).json()
-            number = reply["ticket_id"]
+            self.assertIsNone(reply["ticket_id"])
+            turn = self.bot.history("site:1", "default")[-1]
+            number = self.bot.request_review("site:1", "default", turn["id"])
             self.assertEqual(client.get(f"/tickets/{number}?owner=site:2", headers=user).status_code, 404)
             r = client.post(f"/admin/tickets/{number}", headers=admin, json=dict(
                 revision=0, topic="Срок?", answer="Частный ответ", reviewer="Анна", publish=False))

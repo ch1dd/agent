@@ -7,6 +7,18 @@ from scans import IMAGE_TYPES, image_sections, pdf_sections, recognize
 
 SUPPORTED = {".txt", ".md", ".pdf", ".doc", ".docx"} | IMAGE_TYPES
 CHUNK_SIZE = 1300
+CHUNK_OVERLAP = 200
+
+
+def published_faq(name, path):
+    """Read a knowledge card published by the PHP ticket handler."""
+    if not re.fullmatch(r"faq_ticket_[0-9]+\.txt", name):
+        return None
+    text = path.read_text(encoding="utf-8-sig").strip()
+    question, sep, answer = text.removeprefix("Вопрос:").partition("\n\nОтвет:")
+    if text.startswith("Вопрос:") and sep and question.strip() and answer.strip():
+        return question.strip(), answer.strip()
+    return None
 
 
 @dataclass(frozen=True)
@@ -89,19 +101,22 @@ def sections(path):
 def passages(path: Path, source: str):
     number = 0
     for heading, body in sections(path):
-        rest = body.strip()
-        while rest:
-            end = len(rest)
-            if end > CHUNK_SIZE:
-                window = rest[:CHUNK_SIZE]
+        body = body.strip()
+        start = 0
+        while start < len(body):
+            end = min(start + CHUNK_SIZE, len(body))
+            if end < len(body):
+                window = body[start:end]
                 for delimiter in ("\n", ". ", " "):
                     split = window.rfind(delimiter)
                     if split >= CHUNK_SIZE // 2:
-                        end = split + len(delimiter)
+                        end = start + split + len(delimiter)
                         break
-                else:
-                    end = CHUNK_SIZE
-            number += 1
-            location = f"{heading} · фрагмент {number}" if heading else f"фрагмент {number}"
-            yield Passage(source, location, rest[:end].strip())
-            rest = rest[end:].strip()
+            chunk = body[start:end].rstrip()
+            if chunk.strip():
+                number += 1
+                location = f"{heading} · фрагмент {number}" if heading else f"фрагмент {number}"
+                yield Passage(source, location, chunk)
+            if end == len(body):
+                break
+            start = start + len(chunk) - CHUNK_OVERLAP if len(chunk) > CHUNK_OVERLAP else end

@@ -69,7 +69,8 @@ def chat(bot):
                 with st.expander("Ранжирование источников"):
                     for i, hit in enumerate(row["hits"]):
                         label = " · использован" if i in row["used"] else ""
-                        st.caption(f"№{i+1} · RRF {hit['score']:.4f} · смысловой ранг {hit['dense_rank'] or '—'} · лексический {hit['lexical_rank'] or '—'}{label}")
+                        rank = "Точное совпадение" if hit["dense_rank"] is None and hit["lexical_rank"] is None else f"RRF {hit['score']:.4f}"
+                        st.caption(f"№{i+1} · {rank} · смысловой ранг {hit['dense_rank'] or '—'} · лексический {hit['lexical_rank'] or '—'}{label}")
                         st.text(hit["passage"]["source"] + " · " + hit["passage"]["location"])
                         st.text(hit["passage"]["body"])
             if row.get("human_answer"):
@@ -77,6 +78,9 @@ def chat(bot):
                 st.text(row["human_answer"])
             elif row["ticket_id"]:
                 st.button("Проверить ответ администратора", key=f"refresh-{row['id']}")
+            elif row["kind"] in {"unknown", "off_topic"} and st.button("Создать заявку админу", key=f"ticket-{row['id']}"):
+                bot.request_review(owner, active, row["id"])
+                st.rerun()
     pending = st.session_state.get("pending")
     if pending and pending["chat"] != active:
         del st.session_state.pending

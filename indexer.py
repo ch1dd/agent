@@ -5,21 +5,21 @@ from contextlib import closing
 from pathlib import Path
 
 from config import Config
-from documents import SUPPORTED, passages
+from documents import SUPPORTED, Passage, passages, published_faq
 from ollama_api import ModelService
 from storage import Store, digest
 from originals import snapshot
 
 
-def prepare(store, source, blob):
+def prepare(store, source, blob, faq=None):
     path = store.config.data / "originals" / blob
-    parser = "scan-v2" if path.suffix in {".docx", ".pdf"} else "file-v1"
+    parser = "chunks-1300-200-v1"
     version = digest(f"{parser}\0{source}\0{path.stem}")
     with store.db() as conn:
         known = conn.execute("SELECT 1 FROM originals WHERE version=?", (version,)).fetchone()
         indexed = conn.execute("SELECT 1 FROM active WHERE version=?", (version,)).fetchone()
     if not known and not indexed:
-        chunks = list(passages(path, source))
+        chunks = [Passage(source, "Ответ службы качества", faq[1], faq[0])] if faq else list(passages(path, source))
         if not chunks:
             raise ValueError(f"В документе не найден читаемый текст: {source}.")
         store.write_passages(version, chunks)
@@ -28,10 +28,13 @@ def prepare(store, source, blob):
 
 def activate_upload(store, name, blob):
     source = f"Загрузки/{name}"
-    version = prepare(store, source, blob)
+    faq = published_faq(name, store.config.data / "originals" / blob)
+    version = prepare(store, source, blob, faq)
     with store.db() as conn:
         conn.execute("INSERT OR REPLACE INTO originals VALUES (?,?,?)", (version, name, blob))
         conn.execute("INSERT OR REPLACE INTO active VALUES (?,?,'upload')", ("upload:" + name, version))
+        if faq:
+            store.record_faq(conn, version, source, *faq)
 
 
 def sync(store, directory):

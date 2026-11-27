@@ -11,7 +11,7 @@ from threading import RLock
 
 from qdrant_client import QdrantClient, models as qm
 
-from documents import Passage
+from documents import Passage, published_faq
 from originals import snapshot
 
 
@@ -57,6 +57,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, backend TEXT);
                 CREATE TABLE IF NOT EXISTS originals (
                     version TEXT PRIMARY KEY, name TEXT NOT NULL, blob TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS approved_faq (
+                    version TEXT PRIMARY KEY, lookup TEXT NOT NULL, source TEXT NOT NULL,
+                    question TEXT NOT NULL, answer TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS faq_lookup ON approved_faq(lookup);
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, payload TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
@@ -87,6 +91,29 @@ class Store:
                 blob = snapshot(config.data, BytesIO(card.encode()), ".txt")
                 conn.execute("INSERT OR IGNORE INTO originals VALUES (?,?,?)",
                              (row["version"], f"Решение-{row['id']}.txt", blob))
+            for row in conn.execute("""SELECT a.version,o.name,o.blob FROM active a JOIN originals o USING(version)
+                    LEFT JOIN approved_faq f USING(version) WHERE a.kind='upload' AND f.version IS NULL
+                    AND o.name GLOB 'faq_ticket_[0-9]*.txt'""").fetchall():
+                path = config.data / "originals" / row["blob"]
+                if path.is_file() and (faq := published_faq(row["name"], path)):
+                    self.record_faq(conn, row["version"], "Загрузки/" + row["name"], *faq)
+            for row in conn.execute("""SELECT a.version,t.id,t.topic,t.answer FROM active a JOIN tickets t
+                    ON a.source='quality:'||t.id LEFT JOIN approved_faq f USING(version)
+                    WHERE t.publication='published' AND f.version IS NULL""").fetchall():
+                self.record_faq(conn, row["version"], f"Служба качества • решение №{row['id']}", row["topic"], row["answer"])
+
+    @staticmethod
+    def record_faq(conn, version, source, question, answer):
+        key = " ".join(question.casefold().split())
+        conn.execute("INSERT OR REPLACE INTO approved_faq VALUES (?,?,?,?,?)",
+                     (version, key, source, question, answer))
+
+    def exact_faq(self, question):
+        with self.db() as conn:
+            rows = conn.execute("""SELECT f.* FROM approved_faq f JOIN active a USING(version)
+                WHERE f.lookup=? ORDER BY f.version""", (" ".join(question.casefold().split()),)).fetchall()
+        return [Hit(Passage(r["source"], "Ответ службы качества", r["answer"], r["question"]),
+                    1.0, None, None, r["version"]) for r in rows]
 
     @contextmanager
     def db(self):
@@ -124,7 +151,7 @@ class Store:
     def basis(self):
         with self.db() as conn:
             versions = [row[0] for row in conn.execute("SELECT version FROM active ORDER BY source")]
-        return digest(json.dumps(["verified-answer-v1", self.config.model, self.config.top_k, versions]))
+        return digest(json.dumps(["verified-answer-v2", self.config.model, self.config.top_k, versions]))
 
     def search(self, query):
         if not self.has_sources():
@@ -200,6 +227,7 @@ class Store:
             if updated.rowcount:
                 conn.execute("INSERT OR REPLACE INTO originals VALUES (?,?,?)", (version, f"Решение-{ticket_id}.txt", blob))
                 conn.execute("INSERT OR REPLACE INTO active VALUES (?,?,?)", (f"quality:{ticket_id}", version, "quality"))
+                self.record_faq(conn, version, source, row["topic"], row["answer"])
 
     def approve(self, ticket_id, topic, answer, reviewer):
         job = self.review(ticket_id, topic, answer, reviewer, True, 0)
