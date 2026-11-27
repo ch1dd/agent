@@ -10,7 +10,6 @@ ROUTE = """Ты консультант по внутренним регламе�
 Отвечай только на последнюю реплику сотрудника. При продолжении темы восстанови предмет
 вопроса из истории. При смене темы игнорируй прежнюю. Предыдущий ответ агента не является источником.
 Оцени все фрагменты и все условия.
-off_topic: нет запроса о рабочих процессах компании.
 answer: фрагмент или сочетание нескольких фрагментов прямо отвечает на вопрос, выполнены условия,
 нет противоречий. Укажи основной номер (начиная с 1). В additional укажи только
 нужные для других частей вопроса номера. Выбранные цитаты будут показаны дословно.
@@ -36,6 +35,22 @@ SCOPE = """Классифицируй последнюю реплику. standal
 OUTSIDE = "Я отвечаю на вопросы о процессах компании. Уточните, какой рабочий процесс вас интересует."
 
 
+def message_kind(model, query):
+    words = " ".join(re.findall(r"[\w]+", query.casefold()))
+    # Clear standalone procedural questions need no model rewrite or history.
+    asks = re.search(r"\b(кто|где|когда|кому|како\w*|сколько|котор\w*|в чем)\b", words)
+    subject = re.search(r"\b(договор\w*|регламент\w*|пресейл\w*|заявк\w*|проект\w*|сделк\w*)\b", words)
+    action = re.search(r"\b(подпис\w*|соглас\w*|хран\w*|регистр\w*|расч[её]т\w*|скоринг\w*|заполня\w*|подготов\w*|ответствен\w*)\b", words)
+    if asks and subject and action:
+        return "standalone"
+    if re.fullmatch(r"(соси (хуй|х3уй)|иди на хуй|привет|спасибо)", words):
+        return "off_topic"
+    intent = model.classify(SCOPE, {"реплика": query}, Intent)
+    if intent is None:
+        raise RuntimeError("Не удалось определить тему запроса. Повторите вопрос.")
+    return intent.kind
+
+
 @dataclass
 class Reply:
     kind: str
@@ -46,7 +61,7 @@ class Reply:
     used: list[int] = field(default_factory=list)  # Zero-based positions in hits
 
 
-def branch_question(selected, hits, dialogue):
+def branch_question(selected, hits, dialogue, cited=()):
     """Catch parallel clauses with a different condition and a different result."""
     def words(text):
         return re.findall(r"[\w-]+", text.lower().replace("ё", "е"))
@@ -74,6 +89,8 @@ def branch_question(selected, hits, dialogue):
         if not left or not right:
             continue
         evidence = next((turn for turn in employee if turn & (left | right)), set())
+        if other in cited and evidence & left and evidence & right:
+            continue
         if evidence & left and not evidence & right:
             continue
         suffix = 1 if current[b:b+1] == alternate[d:d+1] else 0
@@ -88,17 +105,15 @@ def respond(store, dialogue, ref, clarifications=0, owner=""):
     query = dialogue[-1]["content"]
     # Determine scope before reading history. Identical standalone inputs reach
     # retrieval, routing and verification with identical prompts.
-    intent = store.model.classify(SCOPE, {"реплика": query}, Intent)
-    if intent is None:
-        raise RuntimeError("Не удалось определить тему запроса. Повторите вопрос.")
-    if intent.kind == "off_topic":
+    kind = message_kind(store.model, query)
+    if kind == "off_topic":
         return Reply("off_topic", OUTSIDE, [])
-    if intent.kind == "followup" and len(dialogue) > 1:
+    if kind == "followup" and len(dialogue) > 1:
         rewrite = store.model.classify("Восстанови самостоятельный поисковый запрос из диалога. "
                                        "Сохрани условия и названия. Не отвечай.", {"диалог": dialogue}, SearchQuery)
         if rewrite:
             query = rewrite.query
-    elif intent.kind == "followup":
+    elif kind == "followup":
         return Reply("clarify", "О каком процессе или документе вы спрашиваете?", [])
     else:
         dialogue = dialogue[-1:]
@@ -109,22 +124,24 @@ def respond(store, dialogue, ref, clarifications=0, owner=""):
     ]}
     if hits:
         decision = store.model.classify(ROUTE, context, Decision)
-        if decision and decision.action == "off_topic":
-            return Reply("off_topic", OUTSIDE, [])
         question = ""
         if decision and decision.action == "answer" and 1 <= decision.passage <= len(hits):
             numbers = list(dict.fromkeys([decision.passage, *decision.additional]))
-            valid = all(1 <= n <= len(hits) for n in numbers)
-            if valid:
-                question = next((q for n in numbers if (q := branch_question(hits[n-1].passage, hits, dialogue))), "")
-            if valid and not question:
+            groups = [numbers[:1]]
+            if len(numbers) > 1 and all(1 <= n <= len(hits) for n in numbers):
+                groups.append(numbers)
+            # Prefer the smallest group that fully answers the question.
+            for group in groups:
+                selected = [hits[n-1].passage for n in group]
+                question = next((q for p in selected if (q := branch_question(p, hits, dialogue, selected))), "")
+                if question:
+                    continue
                 check = store.model.classify(
-                    VERIFY, {**context, "номера_цитат_в_ответе": numbers}, Verification)
+                    VERIFY, {**context, "номера_цитат_в_ответе": group}, Verification)
                 if check and check.supported:
-                    selected = [hits[n-1].passage for n in numbers]
                     origin = "\n".join(" · ".join(filter(None, (p.source, p.location, p.topic))) for p in selected)
                     return Reply("answer", "\n\n".join(p.body for p in selected), hits, origin,
-                                 used=[n-1 for n in numbers])
+                                 used=[n-1 for n in group])
         elif decision and decision.action == "clarify":
             question = decision.question.strip()
         if question:

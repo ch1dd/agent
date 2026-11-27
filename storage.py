@@ -77,6 +77,13 @@ class Store:
             conn.execute("INSERT OR IGNORE INTO settings VALUES (1, ?)", (backend,))
             if conn.execute("SELECT backend FROM settings").fetchone()[0] != backend:
                 raise ValueError("Для другого хранилища или модели эмбеддингов укажите новый RAG_DATA_DIR.")
+            legacy = conn.execute("""SELECT t.*,a.version FROM tickets t JOIN active a ON a.source='quality:'||t.id
+                                   LEFT JOIN originals o ON o.version=a.version WHERE o.version IS NULL AND t.resolved IS NOT NULL""").fetchall()
+            for row in legacy:
+                card = "\n".join([row["topic"], row["answer"], row["reviewer"], row["resolved"] + " UTC"])
+                blob = snapshot(config.data, BytesIO(card.encode()), ".txt")
+                conn.execute("INSERT OR IGNORE INTO originals VALUES (?,?,?)",
+                             (row["version"], f"Решение-{row['id']}.txt", blob))
 
     @contextmanager
     def db(self):

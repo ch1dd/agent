@@ -29,6 +29,7 @@ def run():
             direct = respond(store, [user("Кто подписывает агентский договор с физическим лицом?")], uuid4().hex)
             check("Ответ", direct, "answer")
             assert "коммерческий директор" in direct.text
+            assert len(direct.used) == 1
             insult = respond(store, [
                 user("Кто подписывает агентский договор с физическим лицом?"),
                 {"role": "assistant", "content": direct.text}, user("соси х3уй"),

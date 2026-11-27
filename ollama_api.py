@@ -7,7 +7,7 @@ from typing import Literal
 
 
 class Decision(BaseModel):
-    action: Literal["answer", "clarify", "unknown", "off_topic"]
+    action: Literal["answer", "clarify", "unknown"]
     passage: int = Field(description="Номер единственного достаточного фрагмента или 0")
     question: str = Field(description="Один уточняющий вопрос или пустая строка")
     additional: list[int] = Field(default_factory=list, description="Другие необходимые источники для составного ответа. Обычно пусто.")
@@ -48,7 +48,8 @@ class ModelService:
         return vectors
 
     def classify(self, instruction, data, schema):
-        options = {"temperature": 0, "num_ctx": 8192, "num_predict": 250, "seed": 7}
+        options = {"temperature": 0, "num_ctx": int(os.getenv("RAG_NUM_CTX", "8192")),
+                   "num_predict": 250, "seed": 7}
         if os.getenv("RAG_NUM_GPU"):
             options["num_gpu"] = int(os.environ["RAG_NUM_GPU"])
         output = self.post("chat", {
