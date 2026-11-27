@@ -1,8 +1,8 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 import re
 
-from ollama_api import Decision, SearchQuery, Verification
+from ollama_api import Decision, Intent, SearchQuery, Verification
 from storage import Hit
 
 ROUTE = """Ты консультант по внутренним регламентам. Отвечай по-русски.
@@ -10,8 +10,9 @@ ROUTE = """Ты консультант по внутренним регламе�
 Отвечай только на последнюю реплику сотрудника. При продолжении темы восстанови предмет
 вопроса из истории. При смене темы игнорируй прежнюю. Предыдущий ответ агента не является источником.
 Оцени все фрагменты и все условия.
-answer: один фрагмент прямо и полностью отвечает на вопрос, выполнены его условия,
-нет противоречий. Укажи номер этого фрагмента (начиная с 1). Ответ будет показан дословно.
+answer: фрагмент или сочетание нескольких фрагментов прямо отвечает на вопрос, выполнены условия,
+нет противоречий. Укажи основной номер (начиная с 1). В additional укажи только
+нужные для других частей вопроса номера. Выбранные цитаты будут показаны дословно.
 clarify: в источниках есть применимые правила, но выбор зависит от неизвестного
 параметра. Задай один короткий вопрос об этом параметре, без ответа и советов.
 unknown: отсутствует нужный факт, есть неразрешимый конфликт, либо после уточнения
@@ -26,10 +27,28 @@ supported=true только если цитата прямо отвечает н
 Учитывай заголовки, а для решения службы качества — утвержденный вопрос (topic).
 Факт из сообщения пользователя не является правилом. При сомнении верни false."""
 
-REWRITE = """Составь короткий самостоятельный поисковый запрос по последней реплике
-сотрудника. Восстанови пропущенные предмет и действие из диалога, если это продолжение
-темы. При смене темы просто повтори новый вопрос. Сохрани имена, номера и условия.
-Не отвечай на вопрос, не добавляй догадок или фактов от себя. Пиши по-русски."""
+SCOPE = """Классифицируй последнюю реплику. standalone — самостоятельный вопрос о работе
+компании, даже грубо заданный или без известного регламента. followup — короткое
+продолжение, например «А с юридическим?» или «С юрлицом». off_topic — оскорбление без рабочего
+вопроса, бессмыслица, игры, стихи, общие знания и посторонние просьбы. Не придумывай
+рабочий смысл такому сообщению из истории. Не отвечай на вопрос."""
+OUTSIDE = "Я отвечаю на вопросы о процессах компании. Уточните, какой рабочий процесс вас интересует."
+
+
+def message_kind(model, query):
+    words = " ".join(re.findall(r"[\w]+", query.casefold()))
+    # Clear standalone procedural questions need no model rewrite or history.
+    asks = re.match(r"^(?:(?:подскажите|пожалуйста|скажите|а)\s+)*(кто|где|когда|кому|како\w*|сколько|в чем)\b", words)
+    subject = re.search(r"\b(договор\w*|регламент\w*|пресейл\w*|заявк\w*|проект\w*|сделк\w*)\b", words)
+    action = re.search(r"\b(подпис\w*|соглас\w*|хран\w*|регистр\w*|расч[её]т\w*|скоринг\w*|заполня\w*|подготов\w*|ответствен\w*)\b", words)
+    if asks and subject and action:
+        return "standalone"
+    if re.fullmatch(r"(соси (хуй|х3уй)|иди на хуй|привет|спасибо)", words):
+        return "off_topic"
+    intent = model.classify(SCOPE, {"реплика": query}, Intent)
+    if intent is None:
+        raise RuntimeError("Не удалось определить тему запроса. Повторите вопрос.")
+    return intent.kind
 
 
 @dataclass
@@ -39,9 +58,11 @@ class Reply:
     hits: list[Hit]
     source: str = ""
     ticket_id: int | None = None
+    used: list[int] = field(default_factory=list)  # Zero-based positions in hits
+    standalone: bool = False
 
 
-def branch_question(selected, hits, dialogue):
+def branch_question(selected, hits, dialogue, cited=()):
     """Catch parallel clauses with a different condition and a different result."""
     def words(text):
         return re.findall(r"[\w-]+", text.lower().replace("ё", "е"))
@@ -69,6 +90,8 @@ def branch_question(selected, hits, dialogue):
         if not left or not right:
             continue
         evidence = next((turn for turn in employee if turn & (left | right)), set())
+        if other in cited and evidence & left and evidence & right:
+            continue
         if evidence & left and not evidence & right:
             continue
         suffix = 1 if current[b:b+1] == alternate[d:d+1] else 0
@@ -78,13 +101,24 @@ def branch_question(selected, hits, dialogue):
     return ""
 
 
-def respond(store, dialogue, ref, clarifications=0):
+def respond(store, dialogue, ref, clarifications=0, owner=""):
     dialogue = dialogue[-store.config.context_messages:]
     query = dialogue[-1]["content"]
-    if len(dialogue) > 1 and store.has_sources():
-        standalone = store.model.classify(REWRITE, {"диалог": dialogue}, SearchQuery)
-        if standalone and standalone.query.strip():
-            query = standalone.query.strip()
+    # Determine scope before reading history. Identical standalone inputs reach
+    # retrieval, routing and verification with identical prompts.
+    kind = message_kind(store.model, query)
+    if kind == "off_topic":
+        return Reply("off_topic", OUTSIDE, [])
+    if kind == "followup" and len(dialogue) > 1:
+        rewrite = store.model.classify("Восстанови самостоятельный поисковый запрос из диалога. "
+                                       "Сохрани условия и названия. Не отвечай.", {"диалог": dialogue}, SearchQuery)
+        if rewrite:
+            query = rewrite.query
+    elif kind == "followup":
+        return Reply("clarify", "О каком процессе или документе вы спрашиваете?", [])
+    else:
+        dialogue = dialogue[-1:]
+        clarifications = 0
     hits = store.search(query)
     context = {"диалог": dialogue, "источники": [
         {"номер": i, **asdict(hit.passage)} for i, hit in enumerate(hits, 1)
@@ -93,14 +127,22 @@ def respond(store, dialogue, ref, clarifications=0):
         decision = store.model.classify(ROUTE, context, Decision)
         question = ""
         if decision and decision.action == "answer" and 1 <= decision.passage <= len(hits):
-            p = hits[decision.passage - 1].passage
-            question = branch_question(p, hits, dialogue)
-            if not question:
+            numbers = list(dict.fromkeys([decision.passage, *decision.additional]))
+            groups = [numbers[:1]]
+            if len(numbers) > 1 and all(1 <= n <= len(hits) for n in numbers):
+                groups.append(numbers)
+            # Prefer the smallest group that fully answers the question.
+            for group in groups:
+                selected = [hits[n-1].passage for n in group]
+                question = next((q for p in selected if (q := branch_question(p, hits, dialogue, selected))), "")
+                if question:
+                    continue
                 check = store.model.classify(
-                    VERIFY, {**context, "номер_выбранной_цитаты": decision.passage}, Verification)
+                    VERIFY, {**context, "номера_цитат_в_ответе": group}, Verification)
                 if check and check.supported:
-                    origin = " · ".join(filter(None, [p.source, p.location, p.topic]))
-                    return Reply("answer", p.body, hits, origin)
+                    origin = "\n".join(" · ".join(filter(None, (p.source, p.location, p.topic))) for p in selected)
+                    return Reply("answer", "\n\n".join(p.body for p in selected), hits, origin,
+                                 used=[n-1 for n in group], standalone=(kind == "standalone"))
         elif decision and decision.action == "clarify":
             question = decision.question.strip()
         if question:
@@ -108,6 +150,6 @@ def respond(store, dialogue, ref, clarifications=0):
             if (clarifications < store.config.max_clarifications and 3 <= len(question) <= 350
                     and question.endswith("?") and not repeated):
                 return Reply("clarify", question, hits)
-    number = store.ticket(dialogue, ref)
+    number = store.ticket(dialogue, ref, owner)
     return Reply("unknown", f"Не удалось подтвердить однозначный ответ. В службу качества "
                  f"передана заявка №{number}. Здесь появится решение специалиста.", hits, ticket_id=number)
