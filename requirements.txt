@@ -1,0 +1,10 @@
+qdrant-client==1.20.0
+streamlit==1.67.0
+requests==2.34.2
+pydantic==2.14.4
+pypdf==7.2.0
+python-docx==1.2.0
+legacy-doc==0.2.1
+pypdfium2==5.15.2
+Pillow==13.0.0
+tesserocr==2.13.0

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.rag/
+.ocr-models/
+.rag-*/
+.env
+documents/
+/agent/db.php
+/regulations-agent.zip
