@@ -97,6 +97,7 @@ $queries = $stmt->fetchAll();
                     <?php foreach ($result['hits'] as $i => $hit): ?>
                         <li><?= htmlspecialchars($hit['passage']['source'] . ' · ' . $hit['passage']['location']) ?>
                             · <?= $hit['dense_rank'] === null && $hit['lexical_rank'] === null ? 'Точное совпадение' : 'RRF ' . number_format($hit['score'], 4) ?>
+                            <?= isset($hit['rerank_score']) ? ' · Qwen ' . number_format($hit['rerank_score'], 4) : '' ?>
                             <?= in_array($i, $result['used'] ?? [], true) ? ' · в ответе' : '' ?></li>
                     <?php endforeach; ?>
                     </ol></details>

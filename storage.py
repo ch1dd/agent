@@ -35,6 +35,7 @@ class Hit:
     dense_rank: int | None
     lexical_rank: int | None
     version: str = ""
+    rerank_score: float | None = None
 
 
 class Store:
@@ -158,7 +159,7 @@ class Store:
     def basis(self):
         with self.db() as conn:
             versions = [row[0] for row in conn.execute("SELECT version FROM active ORDER BY source")]
-        return digest(json.dumps(["verified-answer-v3", self.config.model, self.config.top_k, versions]))
+        return digest(json.dumps(["unit-answer-v1", self.config.model, self.config.reranker, self.config.top_k, versions]))
 
     def search(self, query, subject=None):
         if not self.has_sources():
@@ -179,7 +180,7 @@ class Store:
                     continue
                 points = self.client.query_points(
                     self.config.collection, query=signal, using=channel, query_filter=scope,
-                    limit=self.config.top_k * 3, with_payload=True,
+                    limit=max(20, self.config.top_k * 3), with_payload=True,
                 ).points
                 for rank, point in enumerate(points, 1):
                     if point.id not in candidates:
@@ -192,7 +193,13 @@ class Store:
                         hit.lexical_rank = min(rank, hit.lexical_rank or rank)
                     else:
                         hit.dense_rank = min(rank, hit.dense_rank or rank)
-        return sorted(candidates.values(), key=lambda h: h.score, reverse=True)[:self.config.top_k]
+        pool = sorted(candidates.values(), key=lambda h: h.score, reverse=True)[:max(20, self.config.top_k)]
+        if pool:
+            scores = self.model.rerank(query, [hit.passage.search_text() for hit in pool])
+            for hit, score in zip(pool, scores, strict=True):
+                hit.rerank_score = score
+            pool.sort(key=lambda h: h.rerank_score, reverse=True)
+        return pool[:self.config.top_k]
 
     def ticket(self, dialogue, ref, owner=""):
         with self.db() as conn:

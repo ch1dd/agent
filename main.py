@@ -71,6 +71,8 @@ def chat(bot):
                     for i, hit in enumerate(row["hits"]):
                         label = " · использован" if i in row["used"] else ""
                         rank = "Точное совпадение" if hit["dense_rank"] is None and hit["lexical_rank"] is None else f"RRF {hit['score']:.4f}"
+                        if hit.get("rerank_score") is not None:
+                            rank = f"Qwen {hit['rerank_score']:.4f} · {rank}"
                         st.caption(f"№{i+1} · {rank} · смысловой ранг {hit['dense_rank'] or '—'} · лексический {hit['lexical_rank'] or '—'}{label}")
                         st.text(hit["passage"]["source"] + " · " + hit["passage"]["location"])
                         st.text(hit["passage"]["body"])

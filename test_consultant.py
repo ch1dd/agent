@@ -11,7 +11,7 @@ from uuid import uuid4
 from config import Config
 from consultant import Consultant
 from indexer import sync
-from ollama_api import Clarification, Decision, Intent, SearchQuery, Verification
+from ollama_api import Clarification, Decision, Entailment, Intent, SearchQuery, Verification
 from storage import Store
 
 
@@ -38,12 +38,17 @@ class Model:
         if schema is SearchQuery:
             return SearchQuery(query="Кто подписывает договор?")
         if schema is Verification:
-            return Verification(supported=True, quotes=[data["источники"][i-1]["body"] for i in data["номера_цитат_в_ответе"]])
+            return Verification(supported=True, units=[1] * len(data["номера_цитат_в_ответе"]))
+        if schema is Entailment:
+            return Entailment(supported=True)
         if schema is Clarification:
             return Clarification(question="", evidence=[])
         self.queries.append(data["диалог"])
         unknown = data["диалог"][-1]["content"] == "Срок?"
         return Decision(action="unknown" if unknown else "answer", passage=1, question="")
+
+    def rerank(self, query, passages):
+        return [0.5] * len(passages)
 
 
 class ConsultantTest(unittest.TestCase):
@@ -151,7 +156,11 @@ class ConsultantTest(unittest.TestCase):
                     return Decision(action="answer", passage=1, additional=[2], question="")
                 if schema is Verification:
                     indices = data["номера_цитат_в_ответе"]
-                    return Verification(supported=len(indices) >= count, quotes=[data["источники"][i-1]["body"] for i in indices])
+                    return Verification(supported=len(indices) >= count, units=[1] * len(indices))
+                if schema is Entailment:
+                    return Entailment(supported=True)
+                if schema is Clarification:
+                    return Clarification(question="", evidence=[])
                 return Intent(kind="standalone")
             with patch.object(self.model, "classify", side_effect=classify):
                 reply = self.ask(f"Вопрос {count}")
@@ -166,6 +175,29 @@ class ConsultantTest(unittest.TestCase):
         self.assertEqual(reply["kind"], "answer")
         self.assertEqual([m["content"] for m in self.model.queries[-1]],
                          [previous[0]["question"], previous[0]["text"], "физическое"])
+
+    def test_clarifies_before_answer_and_restores_original_subject(self):
+        classify = self.model.classify
+        question = "Кто руководитель?"
+        complete_queries = []
+
+        def classify_turn(instruction, data, schema):
+            if schema is Clarification:
+                complete_queries.append(data["поисковый вопрос"])
+                if len(complete_queries) == 1:
+                    return Clarification(question="В каком отделе", condition="Отдел", evidence=[1])
+            if schema is Intent and data["реплика"] == "В информационном":
+                return Intent(kind="followup")
+            return classify(instruction, data, schema)
+
+        with patch.object(self.model, "classify", side_effect=classify_turn):
+            first = self.ask(question)
+            self.assertEqual((first["kind"], first["text"]), ("clarify", "В каком отделе?"))
+            self.assertFalse(self.model.queries)
+            self.ask("В информационном")
+        self.assertIn(question, complete_queries[1])
+        self.assertIn("Отдел", complete_queries[1])
+        self.assertIn("В информационном", complete_queries[1])
 
     def test_published_site_faq_precedes_scope_and_survives_restart(self):
         card = "Вопрос: lfqasdasd\n\nОтвет: Первый ответ\n"

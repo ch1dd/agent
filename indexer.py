@@ -13,7 +13,7 @@ from originals import snapshot
 
 def prepare(store, source, blob, faq=None, source_key=None):
     path = store.config.data / "originals" / blob
-    parser = "chunks-1300-200-v1"
+    parser = "structure-v1"
     version = digest(f"{parser}\0{source}\0{path.stem}")
     with store.db() as conn:
         conn.execute("INSERT OR IGNORE INTO source_versions VALUES (?,?)", (source_key or source, version))

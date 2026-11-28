@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import re
+from textwrap import wrap
 
 from scans import IMAGE_TYPES, image_sections, pdf_sections, recognize
 
@@ -74,11 +75,23 @@ def sections(path):
                     heading = outline_title(outline, int(level[1]), item.text)
                     lines = []
                 else:
+                    if (item._element.xpath("./w:pPr/w:numPr") or
+                            (item.style and item.style.name.startswith("List Number"))):
+                        yield heading, "\n".join(lines)
+                        lines = []
                     lines.append(item.text)
             else:
-                # Preserve the order and contents of the cells.
-                for row in item.rows:
-                    lines.append("\t".join(c.text for c in row.cells))
+                yield heading, "\n".join(lines)
+                lines = []
+                headers = ""
+                for i, row in enumerate(item.rows):
+                    values = " | ".join(c.text.strip().replace("\n", " ") for c in row.cells)
+                    location = f"таблица · строка {i+1}"
+                    if i and headers:
+                        location += " · первая строка: " + headers
+                    yield " · ".join(filter(None, (heading, location))), values
+                    if i == 0:
+                        headers = values
             for text in embedded_scans(item._element, item.part, path.name):
                 yield heading, "\n".join(lines)
                 lines = []
@@ -98,25 +111,60 @@ def sections(path):
         yield heading, "\n".join(lines)
 
 
+def evidence_units(body):
+    """Units are copied into replies by index, including from older indexed documents."""
+    units = []
+    for line in body.splitlines():
+        number = re.match(r"^\s*\d+(?:\.\d+)*[.)]\s+", line)
+        start = number.end() if number else 0
+        parts = [line[start:]] if "|" in line or "\t" in line else re.split(
+            r"(?<!\b[А-ЯA-Z]\.)(?<=[.!?])\s+(?=[А-ЯЁA-Z0-9«])", line[start:])
+        parts[0] = line[:start] + parts[0]
+        for part in parts:
+            part = part.strip()
+            if len(re.findall(r"\w", part)) >= 2 or re.search(r"\d", part):
+                units.append(part)
+    return units
+
+
+def blocks(body):
+    current = []
+    for line in body.splitlines():
+        if current and re.match(r"^\s*\d+(?:\.\d+)*(?:[.)]|\s*[-–])\s+", line):
+            yield current
+            current = []
+        current.extend(evidence_units(line))
+    if current:
+        yield current
+
+
+def chunks(units):
+    current = []
+    for unit in units:
+        if len(unit) > CHUNK_SIZE:
+            if current:
+                yield "\n".join(current)
+                current = []
+            # A single very long sentence has no sentence boundary to overlap.
+            yield from wrap(unit, width=CHUNK_SIZE, break_on_hyphens=False)
+            continue
+        if len("\n".join([*current, unit])) > CHUNK_SIZE:
+            yield "\n".join(current)
+            while current and (len("\n".join(current)) > CHUNK_OVERLAP or
+                               len("\n".join([*current, unit])) > CHUNK_SIZE):
+                current.pop(0)
+        current.append(unit)
+    if current:
+        yield "\n".join(current)
+
+
 def passages(path: Path, source: str):
     number = 0
     for heading, body in sections(path):
-        body = body.strip()
-        start = 0
-        while start < len(body):
-            end = min(start + CHUNK_SIZE, len(body))
-            if end < len(body):
-                window = body[start:end]
-                for delimiter in ("\n", ". ", " "):
-                    split = window.rfind(delimiter)
-                    if split >= CHUNK_SIZE // 2:
-                        end = start + split + len(delimiter)
-                        break
-            chunk = body[start:end].rstrip()
-            if chunk.strip():
+        for block in blocks(body):
+            for chunk in chunks(block):
+                if not evidence_units(chunk):
+                    continue
                 number += 1
                 location = f"{heading} · фрагмент {number}" if heading else f"фрагмент {number}"
                 yield Passage(source, location, chunk)
-            if end == len(body):
-                break
-            start = start + len(chunk) - CHUNK_OVERLAP if len(chunk) > CHUNK_OVERLAP else end

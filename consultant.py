@@ -184,7 +184,12 @@ class Consultant:
                 WHERE t.owner=? AND t.chat=? AND json_extract(t.result,'$.kind') <> 'off_topic'
                 AND json_extract(t.result,'$.withdrawn') IS NULL
                 ORDER BY t.id DESC LIMIT ?""", (owner, chat, self.store.config.context_messages)).fetchall()
-        return [dict(dict(r), depends_on=sorted(withdrawal.dependencies(json.loads(r["result"])))) for r in reversed(rows)]
+        recent = []
+        for row in reversed(rows):
+            meta = json.loads(row["result"])
+            recent.append(dict(dict(row), pending_query=meta.get("pending_query", ""),
+                               depends_on=sorted(withdrawal.dependencies(meta))))
+        return recent
 
     def request_review(self, owner, chat, turn_id):
         with self.store.db() as conn:
@@ -243,7 +248,8 @@ class Consultant:
                         if saved:
                             meta = json.loads(saved[0])
                             if not meta.get("withdrawn"):
-                                allowed.append(dict(r, depends_on=sorted(withdrawal.dependencies(meta))))
+                                allowed.append(dict(r, depends_on=sorted(withdrawal.dependencies(meta)),
+                                                    pending_query=meta.get("pending_query", "")))
                         elif not revoked:
                             allowed.append(r)
                     rows = allowed
@@ -253,7 +259,8 @@ class Consultant:
             else:
                 # PHP supplies authoritative recent MySQL rows. Streamlit reads its local history.
                 messages.append({"role": "user", "content": question})
-                result = asdict(respond(self.store, messages, count))
+                pending_query = rows[-1].get("pending_query", "") if rows and count else ""
+                result = asdict(respond(self.store, messages, count, pending_query))
                 deps = withdrawal.dependencies(result)
                 if not result["standalone"]:
                     for row in rows[-self.store.config.context_messages:]:

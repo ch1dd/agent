@@ -55,15 +55,14 @@ class IngestionTest(unittest.TestCase):
 
     def test_overlap_within_section(self):
         path = self.root / "длинный.md"
-        body = " ".join(f"пункт{i}" for i in range(420))
+        sentences = [f"Сотрудник заполняет пункт {i}." for i in range(120)]
+        body = " ".join(sentences)
         path.write_text("# Первая часть\n" + body + "\n# Вторая часть\nКороткий ответ.", encoding="utf-8")
         *chunks, last = self.read(path)
         self.assertGreater(len(chunks), 1)
-        rebuilt = chunks[0].body
-        for previous, current in zip(chunks, chunks[1:]):
-            self.assertEqual(previous.body[-200:], current.body[:200])
-            rebuilt += current.body[200:]
-        self.assertEqual(rebuilt, body)
+        lines = [line for chunk in chunks for line in chunk.body.splitlines()]
+        self.assertEqual(list(dict.fromkeys(lines)), sentences)
+        self.assertGreater(len(lines), len(sentences))
         self.assertEqual(last.body, "Короткий ответ.")
 
     def test_native_and_scanned_pdf(self):
@@ -103,8 +102,8 @@ class IngestionTest(unittest.TestCase):
         word.add_picture(str(img))
         path = self.root / "регламент.docx"
         word.save(path)
-        native, ocr = self.read(path)
-        self.assertIn("Ячейка таблицы", native.body)
+        native, table, ocr = self.read(path)
+        self.assertIn("Ячейка таблицы", table.body)
         self.assertIn("Текст из Word.", native.body)
         self.assertEqual(ocr.body, self.line)
         self.assertIn("Регистрация · вложенный скан · OCR", ocr.location)

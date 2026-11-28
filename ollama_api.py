@@ -4,6 +4,7 @@ import os
 import requests
 from pydantic import BaseModel, Field, ValidationError
 from typing import Literal
+from reranker import Reranker
 
 
 class Decision(BaseModel):
@@ -15,12 +16,17 @@ class Decision(BaseModel):
 
 class Verification(BaseModel):
     supported: bool
-    quotes: list[str] = Field(default_factory=list)
+    units: list[int] = Field(default_factory=list, description="По одному номеру строки для каждого выбранного источника")
 
 
 class Clarification(BaseModel):
     question: str
     evidence: list[int]
+    condition: str = Field(default="", description="Название отсутствующего условия, без предложенных вариантов")
+
+
+class Entailment(BaseModel):
+    supported: bool
 
 
 class Intent(BaseModel):
@@ -34,6 +40,10 @@ class SearchQuery(BaseModel):
 class ModelService:
     def __init__(self, config):
         self.config = config
+        self.ranker = Reranker(config.reranker)
+
+    def rerank(self, query, passages):
+        return self.ranker.score(query, passages)
 
     def post(self, endpoint, payload):
         try:

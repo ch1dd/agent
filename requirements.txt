@@ -10,3 +10,5 @@ Pillow==13.0.0
 tesserocr==2.13.0
 starlette==1.10.0
 uvicorn==0.54.0
+torch>=2.8,<3
+transformers>=4.57,<6
